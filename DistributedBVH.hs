@@ -36,21 +36,17 @@ union (Bounds2 lo1 hi1) (Bounds2 lo2 hi2) =
 data Command
 data Query
 
-data Node = Node
-  { commands :: MVar Command
-  }
+data Node = Node (MVar Command)
 
-data NodeState = NodeState
-  { children :: [Node]
-  }
+data NodeState = NodeState [Node]
 
 foreverWith :: (Monad m) => (a -> m a) -> a -> m ()
 foreverWith step state =
   step state >>= foreverWith step
 
 nodeStep :: Node -> NodeState -> IO NodeState
-nodeStep node state = do
-  _c <- takeMVar (commands node)
+nodeStep (Node commands) state = do
+  _c <- takeMVar commands
   return state
 
 startNode :: IO Node
