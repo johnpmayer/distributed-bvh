@@ -6,8 +6,13 @@
 module DistributedBVH where
 
 import Control.Concurrent
---import Data.List (minimumBy)
 import Linear.V2
+
+-- TODO for testing, make these tunable...
+
+minNodeSize, maxNodeSize :: Int
+minNodeSize = 4
+maxNodeSize = 8
 
 -- Bounds2
 
@@ -27,10 +32,12 @@ intersect (Bounds2 lo1 hi1) (Bounds2 lo2 hi2) =
   between lo1 hi1 lo2 || between lo1 hi1 hi2
 
 minStrict :: Ord a => V2 a -> V2 a -> V2 a
-minStrict (V2 x1 y1) (V2 x2 y2) = V2 (min x1 x2) (min y1 y2)
+minStrict (V2 x1 y1) (V2 x2 y2) = 
+  V2 (min x1 x2) (min y1 y2)
 
 maxStrict :: Ord a => V2 a -> V2 a -> V2 a
-maxStrict (V2 x1 y1) (V2 x2 y2) = V2 (max x1 x2) (max y1 y2)
+maxStrict (V2 x1 y1) (V2 x2 y2) = 
+  V2 (max x1 x2) (max y1 y2)
 
 union :: Ord a => Bounds2 a -> Bounds2 a -> Bounds2 a
 union (Bounds2 lo1 hi1) (Bounds2 lo2 hi2) = 
@@ -44,11 +51,15 @@ data Node n = Node (MVar (Command n))
 class Entity e n where
   bounds :: e -> Bounds2 n
 
-data EntityLike n = forall e. Entity n e => EntityLike e
+data EntityLike n 
+ = forall e. Entity n e => EntityLike e
 
-data NodeState n = NodeState [(Bounds2 n, Node n)] | LeafState [(Bounds2 n, EntityLike n)]
+data NodeState n 
+  = NodeState [(Bounds2 n, Node n)] 
+  | LeafState [(Bounds2 n, EntityLike n)]
 
-percentIncrease :: (Ord n, Fractional n) => Bounds2 n -> Bounds2 n -> n
+percentIncrease :: 
+  (Ord n, Fractional n) => Bounds2 n -> Bounds2 n -> n
 percentIncrease current new =
   area (union current new) / area current
 
@@ -65,10 +76,13 @@ instance Ord b => Ord (Compare a b) where
     compare b1 b2
 
 minimumWith :: Ord b => (a -> b) -> [a] -> a
-minimumWith f = getItem . minimum . map (\x -> (Compare x (f x)))
+minimumWith f = 
+  getItem . minimum . map (\x -> (Compare x (f x)))
 
 -- Partial, fails on empty!
-bestMatch :: (Ord n, Fractional n) => Bounds2 n -> [(Bounds2 n, a)] -> a
+bestMatch :: 
+  (Ord n, Fractional n) => 
+    Bounds2 n -> [(Bounds2 n, a)] -> a
 bestMatch test = 
   snd . minimumWith (percentIncrease test . fst)
 
@@ -87,7 +101,8 @@ startNode :: NodeState n -> IO (Node n)
 startNode initial = do
   cs <- newEmptyMVar
   let node = Node cs
-  _nodeThread <- forkIO $ foreverWith (nodeStep node) initial
+  _nodeThread <- forkIO $ 
+    foreverWith (nodeStep node) initial
   return $ Node cs
 
 startEmpty :: IO (Node n)
