@@ -1,15 +1,18 @@
 
 {-# OPTIONS -Wall #-}
+{-# LANGUAGE ExistentialQuantification #-}
+{-# LANGUAGE MultiParamTypeClasses #-}
 
 module DistributedBVH where
 
 import Control.Concurrent
+--import Data.List (minimumBy)
 import Linear.V2
 
 -- Bounds2
 
 data Bounds2 a = Bounds2 !(V2 a) !(V2 a) deriving
-  (Eq,Ord,Show,Read)
+  (Eq,Show)
 
 area :: Num a => Bounds2 a -> a
 area (Bounds2 (V2 x1 y1) (V2 x2 y2)) =
@@ -33,26 +36,61 @@ union :: Ord a => Bounds2 a -> Bounds2 a -> Bounds2 a
 union (Bounds2 lo1 hi1) (Bounds2 lo2 hi2) = 
   Bounds2 (minStrict lo1 lo2) (maxStrict hi1 hi2)
 
-data Command
+data Command n = Insert [EntityLike n]
 data Query
 
-data Node = Node (MVar Command)
+data Node n = Node (MVar (Command n)) 
 
-data NodeState = NodeState [Node]
+class Entity e n where
+  bounds :: e -> Bounds2 n
+
+data EntityLike n = forall e. Entity n e => EntityLike e
+
+data NodeState n = NodeState [(Bounds2 n, Node n)] | LeafState [(Bounds2 n, EntityLike n)]
+
+percentIncrease :: (Ord n, Fractional n) => Bounds2 n -> Bounds2 n -> n
+percentIncrease current new =
+  area (union current new) / area current
+
+data Compare a b = Compare a b
+
+getItem :: Compare a b -> a
+getItem (Compare a _) = a
+
+instance Eq b => Eq (Compare a b) where
+  Compare _ b1 == Compare _ b2 = b1 == b2
+
+instance Ord b => Ord (Compare a b) where
+  compare (Compare _ b1) (Compare _ b2) =
+    compare b1 b2
+
+minimumWith :: Ord b => (a -> b) -> [a] -> a
+minimumWith f = getItem . minimum . map (\x -> (Compare x (f x)))
+
+-- Partial, fails on empty!
+bestMatch :: (Ord n, Fractional n) => Bounds2 n -> [(Bounds2 n, a)] -> a
+bestMatch test = 
+  snd . minimumWith (percentIncrease test . fst)
+
+nodeStep :: Node n -> NodeState n -> IO (NodeState n)
+nodeStep (Node commands) state = do
+  c <- takeMVar commands
+  case c of
+    Insert _els -> return ()
+  return state
 
 foreverWith :: (Monad m) => (a -> m a) -> a -> m ()
 foreverWith step state =
   step state >>= foreverWith step
 
-nodeStep :: Node -> NodeState -> IO NodeState
-nodeStep (Node commands) state = do
-  _c <- takeMVar commands
-  return state
-
-startNode :: IO Node
-startNode = do
+startNode :: NodeState n -> IO (Node n)
+startNode initial = do
   cs <- newEmptyMVar
   let node = Node cs
-  let initial = NodeState []
   _nodeThread <- forkIO $ foreverWith (nodeStep node) initial
   return $ Node cs
+
+startEmpty :: IO (Node n)
+startEmpty = startNode $ LeafState []
+
+
