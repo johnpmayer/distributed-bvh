@@ -51,7 +51,9 @@ data Query
 data Node n = Node (MVar (Command n)) 
 
 class Entity e n where
-  bounds :: e -> Bounds2 n
+  bounds :: e -> IO (Bounds2 n)
+  defaultThing :: e -> Int -> IO ()
+  defaultThing _ _ = return ()
 
 data EntityLike n 
  = forall e. Entity n e => EntityLike e
