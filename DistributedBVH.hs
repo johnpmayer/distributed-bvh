@@ -19,6 +19,8 @@ maxNodeSize = 8
 data Bounds2 a = Bounds2 !(V2 a) !(V2 a) deriving
   (Eq,Show)
 
+type Bounded2 a = (Bounds2 a, a)
+
 area :: Num a => Bounds2 a -> a
 area (Bounds2 (V2 x1 y1) (V2 x2 y2)) =
   abs $ (x2 - x1) * (y2 - y1)
@@ -54,9 +56,12 @@ class Entity e n where
 data EntityLike n 
  = forall e. Entity n e => EntityLike e
 
+type NodeChildren n = [(Bounds2 n, Node n)] 
+type LeafChildren n = [(Bounds2 n, EntityLike n)]
+
 data NodeState n 
-  = NodeState [(Bounds2 n, Node n)] 
-  | LeafState [(Bounds2 n, EntityLike n)]
+  = NodeState (NodeChildren n)
+  | LeafState (LeafChildren n)
 
 percentIncrease :: 
   (Ord n, Fractional n) => Bounds2 n -> Bounds2 n -> n
@@ -79,7 +84,6 @@ minimumWith :: Ord b => (a -> b) -> [a] -> a
 minimumWith f = 
   getItem . minimum . map (\x -> (Compare x (f x)))
 
--- Partial, fails on empty!
 bestMatch :: 
   (Ord n, Fractional n) => 
     Bounds2 n -> [(Bounds2 n, a)] -> a
@@ -108,4 +112,16 @@ startNode initial = do
 startEmpty :: IO (Node n)
 startEmpty = startNode $ LeafState []
 
+insertLeaf :: 
+  LeafChildren n -> [EntityLike n] -> 
+  [LeafChildren n]
+insertLeaf = undefined
 
+insertNode :: 
+  NodeChildren n -> [EntityLike n] -> 
+  IO [NodeChildren n]
+insertNode = undefined
+
+bestSplit :: 
+  [Bounded2 a] -> ([Bounded2 a],[Bounded2 a])
+bestSplit = undefined
