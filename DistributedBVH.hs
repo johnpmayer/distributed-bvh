@@ -7,8 +7,10 @@
 module DistributedBVH where
 
 import Control.Concurrent
+import Control.Concurrent.STM
 import Data.List (maximumBy, partition, tails)
 import Linear.V2
+import System.IO.Unsafe (unsafePerformIO) -- global Node Id counter
 
 -- TODO for testing, make these tunable...
 
@@ -21,7 +23,7 @@ maxNodeSize = 8
 data Bounds2 a = Bounds2 !(V2 a) !(V2 a) deriving
   (Eq,Show)
 
-type Bounded2 a = (Bounds2 a, a)
+type Bounded2 n a = (Bounds2 n, a)
 
 area :: Num a => Bounds2 a -> a
 area (Bounds2 (V2 x1 y1) (V2 x2 y2)) =
@@ -47,21 +49,35 @@ union :: Ord a => Bounds2 a -> Bounds2 a -> Bounds2 a
 union (Bounds2 lo1 hi1) (Bounds2 lo2 hi2) = 
   Bounds2 (minStrict lo1 lo2) (maxStrict hi1 hi2)
 
-data Command n = Insert [EntityLike n]
-data Query
+data Command n = Insert (LeafChildren n)
+data Query 
+data StepInput
 
-data Node n = Node (MVar (Command n)) 
+nextNodeIdGlobal :: TVar Int
+nextNodeIdGlobal = unsafePerformIO $ newTVarIO 0
+
+genNodeId :: IO Int
+genNodeId = atomically $ do
+  nodeId <- readTVar nextNodeIdGlobal
+  writeTVar nextNodeIdGlobal (nodeId + 1)
+  return nodeId
+
+data Node n = Node Int (MVar (Command n)) 
+
+data UpdateResult n = Ok (Bounds2 n) | Die
 
 class Entity e n where
   bounds :: e -> IO (Bounds2 n)
+  update :: e -> StepInput -> IO (UpdateResult n)
+  -- Demonstrate extra optional behaviors
   defaultThing :: e -> Int -> IO ()
   defaultThing _ _ = return ()
 
 data EntityLike n 
  = forall e. Entity n e => EntityLike e
 
-type NodeChildren n = [(Bounds2 n, Node n)] 
-type LeafChildren n = [(Bounds2 n, EntityLike n)]
+type NodeChildren n = [Bounded2 n (Node n)] 
+type LeafChildren n = [Bounded2 n (EntityLike n)]
 
 data NodeState n 
   = NodeState (NodeChildren n)
@@ -95,7 +111,7 @@ bestMatch test =
   snd . minimumWith (percentIncrease test . fst)
 
 nodeStep :: Node n -> NodeState n -> IO (NodeState n)
-nodeStep (Node commands) state = do
+nodeStep (Node _nodeId commands) state = do
   c <- takeMVar commands
   case c of
     Insert _els -> return ()
@@ -107,22 +123,28 @@ foreverWith step state =
 
 startNode :: NodeState n -> IO (Node n)
 startNode initial = do
+  nodeId <- genNodeId
   cs <- newEmptyMVar
-  let node = Node cs
+  let node = Node nodeId cs
   _nodeThread <- forkIO $ 
     foreverWith (nodeStep node) initial
-  return $ Node cs
+  return node
 
 startEmpty :: IO (Node n)
 startEmpty = startNode $ LeafState []
 
-insertLeaf :: 
-  LeafChildren n -> [EntityLike n] -> 
+insertLeaf :: (Ord n, Num n) =>
+  LeafChildren n -> LeafChildren n -> 
   [LeafChildren n]
-insertLeaf = undefined
+insertLeaf leafChildren newLeaves = 
+  let combined = leafChildren ++ newLeaves
+      (split1, split2) = bestSplit combined
+  in if length combined <= maxNodeSize
+     then [combined]
+     else [split1, split2]
 
 insertNode :: 
-  NodeChildren n -> [EntityLike n] -> 
+  NodeChildren n -> LeafChildren n -> 
   IO [NodeChildren n]
 insertNode = undefined
 
@@ -132,10 +154,10 @@ permutations2 list =
   zipWith (zip . repeat) list $
   tails list
 
-bestSplit :: (Ord a, Num a) =>
-  [Bounded2 a] -> ([Bounded2 a],[Bounded2 a])
-bestSplit (children :: [Bounded2 a]) = 
-  let indexedChildren :: [(Bounded2 a, Int)]
+bestSplit :: (Ord n, Num n) =>
+  [Bounded2 n a] -> ([Bounded2 n a],[Bounded2 n a])
+bestSplit (children :: [Bounded2 n a]) = 
+  let indexedChildren :: [(Bounded2 n a, Int)]
       indexedChildren = zip children [0..]
       pairsWithIndex = permutations2 indexedChildren
       worsePair (a,b) (c,d) =
@@ -143,11 +165,11 @@ bestSplit (children :: [Bounded2 a]) =
             ab = area $ union (fst2 a) (fst2 b)
             cd = area $ union (fst2 c) (fst2 d)
         in compare ab cd
-      worst1, worst2 :: (Bounded2 a, Int)
+      worst1, worst2 :: (Bounded2 n a, Int)
       (worst1, worst2) = maximumBy worsePair pairsWithIndex
-      remaining :: [(Bounded2 a, Int)]
+      remaining :: [(Bounded2 n a, Int)]
       remaining = [ x | x <- indexedChildren, not $ elem (snd x) [snd worst1, snd worst2] ]
-      group1, group2 :: [(Bounded2 a, Int)]
+      group1, group2 :: [(Bounded2 n a, Int)]
       (group1, group2) = partition (\i -> worsePair (i,worst1) (i,worst2) == LT) remaining
       length1 = length group1
       length2 = length group2
