@@ -2,10 +2,12 @@
 {-# OPTIONS -Wall #-}
 {-# LANGUAGE ExistentialQuantification #-}
 {-# LANGUAGE MultiParamTypeClasses #-}
+{-# LANGUAGE ScopedTypeVariables #-}
 
 module DistributedBVH where
 
 import Control.Concurrent
+import Data.List (maximumBy, partition, tails)
 import Linear.V2
 
 -- TODO for testing, make these tunable...
@@ -124,6 +126,37 @@ insertNode ::
   IO [NodeChildren n]
 insertNode = undefined
 
-bestSplit :: 
+permutations2 :: [a] -> [(a,a)]
+permutations2 list =
+  concat $
+  zipWith (zip . repeat) list $
+  tails list
+
+bestSplit :: (Ord a, Num a) =>
   [Bounded2 a] -> ([Bounded2 a],[Bounded2 a])
-bestSplit = undefined
+bestSplit (children :: [Bounded2 a]) = 
+  let indexedChildren :: [(Bounded2 a, Int)]
+      indexedChildren = zip children [0..]
+      pairsWithIndex = permutations2 indexedChildren
+      worsePair (a,b) (c,d) =
+        let fst2 = fst . fst
+            ab = area $ union (fst2 a) (fst2 b)
+            cd = area $ union (fst2 c) (fst2 d)
+        in compare ab cd
+      worst1, worst2 :: (Bounded2 a, Int)
+      (worst1, worst2) = maximumBy worsePair pairsWithIndex
+      remaining :: [(Bounded2 a, Int)]
+      remaining = [ x | x <- indexedChildren, not $ elem (snd x) [snd worst1, snd worst2] ]
+      group1, group2 :: [(Bounded2 a, Int)]
+      (group1, group2) = partition (\i -> worsePair (i,worst1) (i,worst2) == LT) remaining
+      length1 = length group1
+      length2 = length group2
+  in (\(a,b) -> (map fst a, map fst b)) $
+    if length1 + 1 < minNodeSize then
+      let (group2A, group2B) = splitAt (minNodeSize - (length1 + 1)) group2
+      in (worst1 : (group1 ++ group2A), worst2 : group2B)
+    else if length2 + 1 < minNodeSize then
+      let (group1A, group1B) = splitAt (minNodeSize - (length2 + 2)) group1
+      in (worst1 : group1A, worst2 : (group1B ++ group2))
+    else (worst1 : group1, worst2 : group2)
+
