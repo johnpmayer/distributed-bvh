@@ -104,10 +104,12 @@ data NodeState n
   = NodeState Height (NodeChildren n)
   | LeafState (LeafChildren n)
 
+unionAllOfBounds :: (Ord n) => [Bounded2 n a] -> Bounds2 n
+unionAllOfBounds = foldl1 union . map fst
+
 calcNodeBounds :: (Ord n) => NodeState n -> Bounds2 n
 calcNodeBounds state = 
-  let unionAllOfBounds = foldl1 union . map fst
-  in case state of
+  case state of
     NodeState _ ns -> unionAllOfBounds ns
     LeafState ls -> unionAllOfBounds ls
 
@@ -138,27 +140,55 @@ bestMatch ::
 bestMatch test = 
   snd . minimumWith (percentIncrease test . fst)
 
-nodeStep :: Node n -> NodeState n -> IO (NodeState n)
+nodeStep :: (Ord n, Fractional n) => 
+  Node n -> NodeState n -> IO (Maybe (NodeState n))
 nodeStep (Node _nodeId commands) state = do
   c <- takeMVar commands
   case c of
-    Insert _els _sendResult -> return ()
-  return state
+    Insert newEntities sendResult -> case state of
+      NodeState h childNodes -> do
+        results <- insertNode h childNodes newEntities
+        case results of
+          [] -> error "Broken Insert NonEmpty Invariant"
+          [newChildren] -> do
+            let result = Inserted $ unionAllOfBounds newChildren
+            putMVar sendResult result
+            return . Just $ NodeState h newChildren
+          [split1, split2] -> do
+            let result = SplitNode (NodeState h split1, NodeState h split2)
+            putMVar sendResult result
+            return Nothing
+          _ -> error "Broken Split > 2 Invariant"
+      LeafState childEntities -> do
+        case insertLeaf childEntities newEntities of
+          [] -> error "Broken Insert NonEmpty Invariant"
+          [newLeaves] -> do
+            let result = Inserted $ unionAllOfBounds newLeaves
+            putMVar sendResult result
+            return . Just $ LeafState newLeaves
+          [split1, split2] -> do
+            let result = SplitNode (LeafState split1, LeafState split2)
+            putMVar sendResult result
+            return Nothing
+          _ -> error "Broken Split > 2 Invariant"
 
-foreverWith :: (Monad m) => (a -> m a) -> a -> m ()
-foreverWith step state =
-  step state >>= foreverWith step
+foreverUntil :: (Monad m) => (a -> m (Maybe a)) -> a -> m ()
+foreverUntil step state = do
+  newState <- step state
+  case newState of
+    Nothing -> return ()
+    Just s -> foreverUntil step s
 
-startNode :: NodeState n -> IO (Node n)
+startNode :: (Ord n, Fractional n) => NodeState n -> IO (Node n)
 startNode initial = do
   nodeId <- genNodeId
   cs <- newEmptyMVar
   let node = Node nodeId cs
   _nodeThread <- forkIO $ 
-    foreverWith (nodeStep node) initial
+    foreverUntil (nodeStep node) initial
   return node
 
-startEmpty :: IO (Node n)
+startEmpty :: (Ord n, Fractional n) => IO (Node n)
 startEmpty = startNode $ LeafState []
 
 insertLeaf :: (Ord n, Num n) =>
@@ -177,7 +207,7 @@ groupToMap fKey =
   let step x acc = Map.insertWith (++) (fKey x) [x] acc
   in foldr step Map.empty
 
-addSplitNodes :: Ord n =>
+addSplitNodes :: (Ord n, Fractional n) =>
   NodeState n -> NodeState n -> NodeChildren n -> IO (NodeChildren n)
 addSplitNodes ns1 ns2 acc =
   let b1 = calcNodeBounds ns1
@@ -187,10 +217,10 @@ addSplitNodes ns1 ns2 acc =
     childNode2 <- startNode ns2
     return $ (b1, childNode1) : (b2, childNode2) : acc
 
-collectSubResults :: Ord n =>
+collectSubResults :: (Ord n, Fractional n) =>
   Height -> [(Node n, InsertResult n)] -> IO (NodeChildren n)
 collectSubResults h = 
-  let step :: Ord n =>
+  let step :: (Ord n, Fractional n) =>
         NodeChildren n -> (Node n, InsertResult n) -> IO (NodeChildren n)
       step acc result =
         case result of
@@ -203,7 +233,7 @@ collectSubResults h =
           (_dead, (SplitNode (n1@(NodeState h1 _), n2@(NodeState h2 _)))) 
             | h == h1 + 1 && h == h2 + 1 -> 
               addSplitNodes n1 n2 acc
-          _ -> error "Broken Invariant"
+          _ -> error "Broken Collect Height Invariant"
   in foldM step []
 
 insertNode :: (Ord n, Fractional n) =>
