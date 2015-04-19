@@ -26,7 +26,7 @@ main :: IO ()
 main = do
   root <- newTVarIO $ LeafState []
   recvInsertPlayer <- newEmptyMVar
-  _spawnPlayerThread <- forkIO . forever $ do
+  _spawnNewPlayersThread <- forkIO . forever $ do
     _newLeaf <- takeMVar recvInsertPlayer
     undefined
   let state = ServerState root recvInsertPlayer

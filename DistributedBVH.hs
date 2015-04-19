@@ -141,10 +141,9 @@ bestMatch test =
   snd . minimumWith (percentIncrease test . fst)
 
 nodeStep :: (Ord n, Fractional n) => 
-  Node n -> NodeState n -> IO (Maybe (NodeState n))
-nodeStep (Node _nodeId commands) state = do
-  c <- takeMVar commands
-  case c of
+  Command n -> NodeState n -> IO (Maybe (NodeState n))
+nodeStep command state = do
+  case command of
     Insert newEntities sendResult -> case state of
       NodeState h childNodes -> do
         results <- insertNode h childNodes newEntities
@@ -182,10 +181,11 @@ foreverUntil step state = do
 startNode :: (Ord n, Fractional n) => NodeState n -> IO (Node n)
 startNode initial = do
   nodeId <- genNodeId
-  cs <- newEmptyMVar
-  let node = Node nodeId cs
-  _nodeThread <- forkIO $ 
-    foreverUntil (nodeStep node) initial
+  commands <- newEmptyMVar
+  let node = Node nodeId commands
+  _nodeThread <- forkIO $ foreverUntil (\state -> do
+    cmd <- takeMVar commands
+    nodeStep cmd state) initial
   return node
 
 startEmpty :: (Ord n, Fractional n) => IO (Node n)
