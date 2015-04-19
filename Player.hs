@@ -2,6 +2,7 @@
 {-# OPTIONS -Wall #-}
 {-# LANGUAGE MultiParamTypeClasses #-}
 {-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE TupleSections #-}
 
 module Player where
 
@@ -18,18 +19,34 @@ import System.Random
 import DistributedBVH
 
 data ServerState = ServerState 
-  { getRoot :: TVar (NodeState Double)
+  { getRoot :: MVar (Height, Node Double)
   , sendInsertPlayer :: MVar (Player)
   }
 
+spawnNewPlayer :: ServerState -> IO ()
+spawnNewPlayer state = do
+  oldRoot@(h, root) <- takeMVar (getRoot state)
+  newPlayer <- takeMVar (sendInsertPlayer state)
+  recvResult <- newEmptyMVar
+  playerBounds <- bounds newPlayer
+  let newEntity :: EntityLike Double = EntityLike newPlayer
+  let command = Insert [(playerBounds, newEntity)] recvResult
+  putMVar (sendToNode root) command
+  result <- takeMVar recvResult
+  case result of
+    Inserted _newBounds -> putMVar (getRoot state) oldRoot
+    SplitNode split1 split2 -> do
+      newRootChildren <- addSplitNodes split1 split2 []
+      let newH = h + 1
+      newRoot <- startNode $ NodeState newH newRootChildren
+      putMVar (getRoot state) (newH, newRoot)
+
 main :: IO ()
 main = do
-  root <- newTVarIO $ LeafState []
+  root <- (0,) <$> startEmpty >>= newMVar
   recvInsertPlayer <- newEmptyMVar
-  _spawnNewPlayersThread <- forkIO . forever $ do
-    _newLeaf <- takeMVar recvInsertPlayer
-    undefined
   let state = ServerState root recvInsertPlayer
+  _spawnNewPlayersThread <- forkIO . forever $ spawnNewPlayer state
   WS.runServer "0.0.0.0" 9160 $ application state
 
 data Player = Player 
@@ -56,13 +73,14 @@ instance Entity Player Double where
     Ok <$> bounds player
   
 runPlayer :: ServerState -> WS.Connection -> IO ()
-runPlayer _state conn = do
+runPlayer state conn = do
   putStrLn "Starting Player"
   pos <- V2 <$> randomRIO (-99, 99) <*> randomRIO (-99,99)
   rad <- randomRIO (5,20)
   dieConn :: MVar () <- newEmptyMVar
   toClient <- newEmptyMVar
-  _player <- Player <$> newTVarIO pos <*> newTVarIO rad <*> return toClient
+  player <- Player <$> newTVarIO pos <*> newTVarIO rad <*> return toClient
+  putMVar (sendInsertPlayer state) player
   _sendThreadId <- forkIO . forever $ do
     msg <- readMVar toClient
     WS.send conn $ WS.DataMessage msg

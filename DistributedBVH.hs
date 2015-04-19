@@ -62,7 +62,7 @@ type InsertParams n = LeafChildren n
 
 data InsertResult n
   = Inserted (Bounds2 n)
-  | SplitNode (NodeState n, NodeState n)
+  | SplitNode (NodeState n) (NodeState n)
 
 data Query 
 
@@ -92,7 +92,7 @@ class Entity e n where
   defaultThing _ _ = return ()
 
 data EntityLike n 
- = forall e. Entity n e => EntityLike e
+ = forall e. Entity e n => EntityLike e
 
 type NodeChildren n = [Bounded2 n (Node n)] 
 type LeafChildren n = [Bounded2 n (EntityLike n)]
@@ -154,7 +154,7 @@ nodeStep command state = do
             putMVar sendResult result
             return . Just $ NodeState h newChildren
           [split1, split2] -> do
-            let result = SplitNode (NodeState h split1, NodeState h split2)
+            let result = SplitNode (NodeState h split1) (NodeState h split2)
             putMVar sendResult result
             return Nothing
           _ -> error "Broken Split > 2 Invariant"
@@ -166,7 +166,7 @@ nodeStep command state = do
             putMVar sendResult result
             return . Just $ LeafState newLeaves
           [split1, split2] -> do
-            let result = SplitNode (LeafState split1, LeafState split2)
+            let result = SplitNode (LeafState split1) (LeafState split2)
             putMVar sendResult result
             return Nothing
           _ -> error "Broken Split > 2 Invariant"
@@ -183,9 +183,10 @@ startNode initial = do
   nodeId <- genNodeId
   commands <- newEmptyMVar
   let node = Node nodeId commands
-  _nodeThread <- forkIO $ foreverUntil (\state -> do
+  nodeThread <- forkIO $ foreverUntil (\state -> do
     cmd <- takeMVar commands
     nodeStep cmd state) initial
+  putStrLn $ "Started Node: " ++ show nodeId ++ ": " ++ show nodeThread
   return node
 
 startEmpty :: (Ord n, Fractional n) => IO (Node n)
@@ -227,10 +228,10 @@ collectSubResults h =
           _ | h < 1 -> error "Min non-leaf height is 1"
           (childNode, (Inserted b)) -> 
             return $ (b, childNode) : acc
-          (_dead, (SplitNode (l1@(LeafState _), l2@(LeafState _)))) 
+          (_dead, (SplitNode l1@(LeafState _) l2@(LeafState _))) 
             | h == 1 ->
               addSplitNodes l1 l2 acc
-          (_dead, (SplitNode (n1@(NodeState h1 _), n2@(NodeState h2 _)))) 
+          (_dead, (SplitNode n1@(NodeState h1 _) n2@(NodeState h2 _))) 
             | h == h1 + 1 && h == h2 + 1 -> 
               addSplitNodes n1 n2 acc
           _ -> error "Broken Collect Height Invariant"
