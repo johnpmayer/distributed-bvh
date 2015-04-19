@@ -1,16 +1,23 @@
 
 {-# OPTIONS -Wall #-}
 {-# LANGUAGE ExistentialQuantification #-}
+{-# LANGUAGE GeneralizedNewtypeDeriving #-}
 {-# LANGUAGE MultiParamTypeClasses #-}
 {-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE TupleSections #-}
 
 module DistributedBVH where
 
+import Control.Applicative 
 import Control.Concurrent
+--import Control.Concurrent.Async
 import Control.Concurrent.STM
+import Control.Monad (foldM)
 import Data.List (maximumBy, partition, tails)
+import Data.Map (Map)
+import qualified Data.Map.Strict as Map
 import Linear.V2
-import System.IO.Unsafe (unsafePerformIO) -- global Node Id counter
+import System.IO.Unsafe (unsafePerformIO) -- global node Id counter
 
 -- TODO for testing, make these tunable...
 
@@ -49,8 +56,16 @@ union :: Ord a => Bounds2 a -> Bounds2 a -> Bounds2 a
 union (Bounds2 lo1 hi1) (Bounds2 lo2 hi2) = 
   Bounds2 (minStrict lo1 lo2) (maxStrict hi1 hi2)
 
-data Command n = Insert (LeafChildren n)
+data Command n = Insert (InsertParams n) (MVar (InsertResult n))
+
+type InsertParams n = LeafChildren n
+
+data InsertResult n
+  = Inserted (Bounds2 n)
+  | SplitNode (NodeState n, NodeState n)
+
 data Query 
+
 data StepInput
 
 nextNodeIdGlobal :: TVar Int
@@ -62,7 +77,10 @@ genNodeId = atomically $ do
   writeTVar nextNodeIdGlobal (nodeId + 1)
   return nodeId
 
-data Node n = Node Int (MVar (Command n)) 
+data Node n = Node 
+  { getNodeId :: Int 
+  , sendToNode :: (MVar (Command n))
+  }
 
 data UpdateResult n = Ok (Bounds2 n) | Die
 
@@ -79,9 +97,19 @@ data EntityLike n
 type NodeChildren n = [Bounded2 n (Node n)] 
 type LeafChildren n = [Bounded2 n (EntityLike n)]
 
+newtype Height = Height Int
+  deriving (Eq, Ord, Num)
+
 data NodeState n 
-  = NodeState (NodeChildren n)
+  = NodeState Height (NodeChildren n)
   | LeafState (LeafChildren n)
+
+calcNodeBounds :: (Ord n) => NodeState n -> Bounds2 n
+calcNodeBounds state = 
+  let unionAllOfBounds = foldl1 union . map fst
+  in case state of
+    NodeState _ ns -> unionAllOfBounds ns
+    LeafState ls -> unionAllOfBounds ls
 
 percentIncrease :: 
   (Ord n, Fractional n) => Bounds2 n -> Bounds2 n -> n
@@ -114,7 +142,7 @@ nodeStep :: Node n -> NodeState n -> IO (NodeState n)
 nodeStep (Node _nodeId commands) state = do
   c <- takeMVar commands
   case c of
-    Insert _els -> return ()
+    Insert _els _sendResult -> return ()
   return state
 
 foreverWith :: (Monad m) => (a -> m a) -> a -> m ()
@@ -139,14 +167,67 @@ insertLeaf :: (Ord n, Num n) =>
 insertLeaf leafChildren newLeaves = 
   let combined = leafChildren ++ newLeaves
       (split1, split2) = bestSplit combined
-  in if length combined <= maxNodeSize
-     then [combined]
-     else [split1, split2]
+  in 
+    if length combined <= maxNodeSize
+    then [combined]
+    else [split1, split2]
 
-insertNode :: 
-  NodeChildren n -> LeafChildren n -> 
+groupToMap :: Ord k => (a -> k) -> [a] -> Map k [a]
+groupToMap fKey =
+  let step x acc = Map.insertWith (++) (fKey x) [x] acc
+  in foldr step Map.empty
+
+addSplitNodes :: Ord n =>
+  NodeState n -> NodeState n -> NodeChildren n -> IO (NodeChildren n)
+addSplitNodes ns1 ns2 acc =
+  let b1 = calcNodeBounds ns1
+      b2 = calcNodeBounds ns2
+  in do
+    childNode1 <- startNode ns1
+    childNode2 <- startNode ns2
+    return $ (b1, childNode1) : (b2, childNode2) : acc
+
+collectSubResults :: Ord n =>
+  Height -> [(Node n, InsertResult n)] -> IO (NodeChildren n)
+collectSubResults h = 
+  let step :: Ord n =>
+        NodeChildren n -> (Node n, InsertResult n) -> IO (NodeChildren n)
+      step acc result =
+        case result of
+          _ | h < 1 -> error "Min non-leaf height is 1"
+          (childNode, (Inserted b)) -> 
+            return $ (b, childNode) : acc
+          (_dead, (SplitNode (l1@(LeafState _), l2@(LeafState _)))) 
+            | h == 1 ->
+              addSplitNodes l1 l2 acc
+          (_dead, (SplitNode (n1@(NodeState h1 _), n2@(NodeState h2 _)))) 
+            | h == h1 + 1 && h == h2 + 1 -> 
+              addSplitNodes n1 n2 acc
+          _ -> error "Broken Invariant"
+  in foldM step []
+
+insertNode :: (Ord n, Fractional n) =>
+  Height -> NodeChildren n -> LeafChildren n -> 
   IO [NodeChildren n]
-insertNode = undefined
+insertNode h nodeChildren newLeaves = 
+  let chooseNode leaf = bestMatch (fst leaf) nodeChildren
+      chosenNodes = map (\leaf -> (leaf, chooseNode leaf)) newLeaves
+      subTasks = groupToMap (getNodeId . snd) chosenNodes
+      spawnWork childNode = do
+        let lns = Map.findWithDefault [] (getNodeId childNode) subTasks
+            newLeaves' = fst <$> lns
+        recvResult <- newEmptyMVar
+        let work = Insert newLeaves' recvResult
+        putMVar (sendToNode childNode) work
+        (childNode,) <$> takeMVar recvResult
+  in do
+    results <- mapM spawnWork $ map snd nodeChildren
+    newChildren <- collectSubResults h results
+    let (split1, split2) = bestSplit newChildren
+    return $ 
+      if length newChildren <= maxNodeSize
+      then [newChildren]
+      else [split1, split2]
 
 permutations2 :: [a] -> [(a,a)]
 permutations2 list =

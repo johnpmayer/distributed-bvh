@@ -1,6 +1,7 @@
 
 {-# OPTIONS -Wall #-}
 {-# LANGUAGE MultiParamTypeClasses #-}
+{-# LANGUAGE ScopedTypeVariables #-}
 
 module Player where
 
@@ -16,12 +17,19 @@ import System.Random
 
 import DistributedBVH
 
-data ServerState = ServerState (NodeState Double)
+data ServerState = ServerState 
+  { getRoot :: TVar (NodeState Double)
+  , sendInsertPlayer :: MVar (Player)
+  }
 
 main :: IO ()
 main = do
-  let root = LeafState []
-  state <- newMVar $ ServerState root
+  root <- newTVarIO $ LeafState []
+  recvInsertPlayer <- newEmptyMVar
+  _spawnPlayerThread <- forkIO . forever $ do
+    _newLeaf <- takeMVar recvInsertPlayer
+    undefined
+  let state = ServerState root recvInsertPlayer
   WS.runServer "0.0.0.0" 9160 $ application state
 
 data Player = Player 
@@ -47,20 +55,21 @@ instance Entity Player Double where
     putMVar (sendToClient player) message
     Ok <$> bounds player
   
-runPlayer :: MVar ServerState -> WS.Connection -> IO ()
+runPlayer :: ServerState -> WS.Connection -> IO ()
 runPlayer _state conn = do
   putStrLn "Starting Player"
   pos <- V2 <$> randomRIO (-99, 99) <*> randomRIO (-99,99)
   rad <- randomRIO (5,20)
-  _dieConn <- newEmptyMVar
+  dieConn :: MVar () <- newEmptyMVar
   toClient <- newEmptyMVar
   _player <- Player <$> newTVarIO pos <*> newTVarIO rad <*> return toClient
   _sendThreadId <- forkIO . forever $ do
     msg <- readMVar toClient
     WS.send conn $ WS.DataMessage msg
+  takeMVar dieConn
   return ()
 
-application :: MVar ServerState -> WS.ServerApp
+application :: ServerState -> WS.ServerApp
 application state pending = do
   WS.acceptRequest pending >>= runPlayer state
 
