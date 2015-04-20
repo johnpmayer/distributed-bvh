@@ -1,16 +1,19 @@
 
 {-# OPTIONS -Wall #-}
 {-# LANGUAGE ExistentialQuantification #-}
+{-# LANGUAGE FlexibleInstances #-}
+{-# LANGUAGE GADTs #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
 {-# LANGUAGE MultiParamTypeClasses #-}
+{-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TupleSections #-}
+{-# LANGUAGE TypeFamilies #-}
 
 module DistributedBVH where
 
 import Control.Applicative 
 import Control.Concurrent
---import Control.Concurrent.Async
 import Control.Concurrent.STM
 import Control.Monad (foldM)
 import Data.List (maximumBy, partition, tails)
@@ -18,6 +21,8 @@ import Data.Map (Map)
 import qualified Data.Map.Strict as Map
 import Linear.V2
 import System.IO.Unsafe (unsafePerformIO) -- global node Id counter
+
+import Logging
 
 -- TODO for testing, make these tunable...
 
@@ -56,17 +61,16 @@ union :: Ord a => Bounds2 a -> Bounds2 a -> Bounds2 a
 union (Bounds2 lo1 hi1) (Bounds2 lo2 hi2) = 
   Bounds2 (minStrict lo1 lo2) (maxStrict hi1 hi2)
 
-data Command n = Insert (InsertParams n) (MVar (InsertResult n))
+data Command n 
+  = Insert (InsertParams n) (MVar (InsertResult n))
+  | Update (MVar ())
 
 type InsertParams n = LeafChildren n
-
 data InsertResult n
   = Inserted (Bounds2 n)
   | SplitNode (NodeState n) (NodeState n)
 
-data Query 
-
-data StepInput
+data StepInput = StepInput
 
 nextNodeIdGlobal :: TVar Int
 nextNodeIdGlobal = unsafePerformIO $ newTVarIO 0
@@ -84,15 +88,18 @@ data Node n = Node
 
 data UpdateResult n = Ok (Bounds2 n) | Die
 
-class Entity e n where
-  bounds :: e -> IO (Bounds2 n)
-  update :: e -> StepInput -> IO (UpdateResult n)
-  -- Demonstrate extra optional behaviors
-  defaultThing :: e -> Int -> IO ()
-  defaultThing _ _ = return ()
+class Entity e where
+  type N e
+  bounds :: e -> IO (Bounds2 (N e))
+  update :: e -> StepInput -> IO (UpdateResult (N e))
 
 data EntityLike n 
- = forall e. Entity e n => EntityLike e
+ = forall e. (Entity e, N e ~ n) => EntityLike { getEntity :: e }
+
+instance Entity (EntityLike n) where
+  type N (EntityLike n) = n
+  bounds (EntityLike e) = bounds e
+  update (EntityLike e) stepInput = update e stepInput
 
 type NodeChildren n = [Bounded2 n (Node n)] 
 type LeafChildren n = [Bounded2 n (EntityLike n)]
@@ -142,7 +149,7 @@ bestMatch test =
 
 nodeStep :: (Ord n, Fractional n) => 
   Command n -> NodeState n -> IO (Maybe (NodeState n))
-nodeStep command state = do
+nodeStep (command :: Command n) (state :: NodeState n) = do
   case command of
     Insert newEntities sendResult -> case state of
       NodeState h childNodes -> do
@@ -170,6 +177,23 @@ nodeStep command state = do
             putMVar sendResult result
             return Nothing
           _ -> error "Broken Split > 2 Invariant"
+    Update sendFinished -> case state of
+      NodeState _ childNodes -> do
+        logInfo .toLogStr $ "Updating Node with size " ++ show (length childNodes)
+        recvFinishes <- flip mapM childNodes $ \(_,childNode) -> do
+          recvFinish <- newEmptyMVar
+          let childCommand = Update recvFinish
+          putMVar (sendToNode childNode) childCommand
+          return recvFinish
+        _finishes <- mapM takeMVar recvFinishes
+        putMVar sendFinished ()
+        return $ Just state
+      LeafState (leafEntities :: LeafChildren n) -> do
+        logInfo . toLogStr $ "Updating Leaf with size " ++ show (length leafEntities)
+        _finishes <- flip mapM leafEntities $ \(_, (el :: EntityLike n)) -> do
+          update el StepInput
+        putMVar sendFinished ()
+        return $ Just state
 
 foreverUntil :: (Monad m) => (a -> m (Maybe a)) -> a -> m ()
 foreverUntil step state = do
@@ -186,7 +210,7 @@ startNode initial = do
   nodeThread <- forkIO $ foreverUntil (\state -> do
     cmd <- takeMVar commands
     nodeStep cmd state) initial
-  putStrLn $ "Started Node: " ++ show nodeId ++ ": " ++ show nodeThread
+  logInfo . toLogStr $ "Started Node: " ++ show nodeId ++ ": " ++ show nodeThread
   return node
 
 startEmpty :: (Ord n, Fractional n) => IO (Node n)
